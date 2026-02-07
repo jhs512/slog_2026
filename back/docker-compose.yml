@@ -1,0 +1,15 @@
+services:
+  db-dev:
+    image: postgres:18
+    container_name: slog_dev_db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: slog_dev
+      POSTGRES_USER: slog
+      POSTGRES_PASSWORD: slog1234
+    volumes:
+      - slog_dev_data:/var/lib/postgresql
+
+volumes:
+  slog_dev_data:
