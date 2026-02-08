@@ -7,7 +7,7 @@ spring:
   jpa:
     show-sql: false
     hibernate:
-      ddl-auto: none
+      ddl-auto: update
 custom:
   site:
     cookieDomain: "${custom.prod.cookieDomain}"
