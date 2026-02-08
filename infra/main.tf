@@ -249,8 +249,24 @@ docker run -d \
   -e POSTGRES_PASSWORD=${var.password_1} \
   -e POSTGRES_DB=${var.app_1_db_name} \
   -e TZ=Asia/Seoul \
-  -v /dockerProjects/postgresql_1/volumes/data:/var/lib/postgresql/data \
+  -v /dockerProjects/postgresql_1/volumes/data:/var/lib/postgresql \
   postgres:18
+
+# PostgreSQL 컨테이너가 준비될 때까지 대기
+echo "PostgreSQL이 기동될 때까지 대기 중..."
+until docker exec postgresql_1 pg_isready -U slog &> /dev/null; do
+  echo "PostgreSQL이 아직 준비되지 않음. 5초 후 재시도..."
+  sleep 5
+done
+echo "PostgreSQL이 준비됨. 초기화 스크립트 실행 중..."
+
+docker exec postgresql_1 psql -U slog -d ${var.app_1_db_name} -c "
+CREATE USER lldjlocal WITH PASSWORD '1234';
+GRANT ALL PRIVILEGES ON DATABASE \"${var.app_1_db_name}\" TO lldjlocal;
+GRANT ALL PRIVILEGES ON SCHEMA public TO lldjlocal;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO lldjlocal;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO lldjlocal;
+"
 
 echo "${var.github_access_token_1}" | docker login ghcr.io -u ${var.github_access_token_1_owner} --password-stdin
 
