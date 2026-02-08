@@ -194,7 +194,34 @@ jobs:
               -H "Authorization: Bearer ${TOKEN}" \
               | jq ".[] | select(.domain_names[]==\"${APP_1_DOMAIN}\") | .id")
 
-            [[ -n "${PROXY_ID}" && "${PROXY_ID}" != "null" ]] || { echo "Proxy host not found for ${APP_1_DOMAIN}"; exit 1; }
+            # 프록시 호스트가 없으면 자동 생성 (웹소켓 ON, 캐시 에셋 ON, SSL 미설정)
+            if [[ -z "${PROXY_ID}" || "${PROXY_ID}" == "null" ]]; then
+              echo "📝 Proxy host not found for ${APP_1_DOMAIN}. Creating..."
+              CREATE_BODY=$(jq -n \
+                --arg domain "${APP_1_DOMAIN}" \
+                --arg host "${SLOT1}" \
+                --argjson port ${PORT_IN} \
+                '{
+                  domain_names: [$domain],
+                  forward_host: $host,
+                  forward_port: $port,
+                  forward_scheme: "http",
+                  allow_websocket_upgrade: true,
+                  caching_enabled: true,
+                  block_exploits: true,
+                  access_list_id: 0,
+                  advanced_config: "",
+                  meta: { letsencrypt_agree: false, dns_challenge: false },
+                  locations: []
+                }')
+              PROXY_ID=$(curl -s -X POST "http://127.0.0.1:81/api/nginx/proxy-hosts" \
+                -H "Authorization: Bearer ${TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d "${CREATE_BODY}" | jq '.id')
+              echo "✅ Proxy host created: ID=${PROXY_ID}"
+            fi
+
+            [[ -n "${PROXY_ID}" && "${PROXY_ID}" != "null" ]] || { echo "Proxy host create failed for ${APP_1_DOMAIN}"; exit 1; }
 
             # 현재 프록시가 바라보는 업스트림(컨테이너명) 조회
             CURRENT_HOST=$(curl -s -X GET "http://127.0.0.1:81/api/nginx/proxy-hosts/${PROXY_ID}" \
