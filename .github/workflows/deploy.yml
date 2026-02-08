@@ -230,6 +230,11 @@ jobs:
               --restart unless-stopped \
               --network "${NET}" \
               -e TZ=Asia/Seoul \
+              -e DB_HOST=postgresql_1 \
+              -e DB_PORT=5432 \
+              -e DB_NAME="${APP_1_DB_NAME}" \
+              -e DB_USERNAME=slog \
+              -e DB_PASSWORD="${PASSWORD_1}" \
               "${IMAGE}"
 
             # ---------------------------------------------------------
