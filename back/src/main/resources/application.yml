@@ -82,7 +82,7 @@ custom:
     frontUrl: "http://${custom.dev.cookieDomain}:3000"
     backUrl: "http://${custom.dev.cookieDomain}:8080"
   prod:
-    cookieDomain: slog.gg
+    cookieDomain: slog2026.oa.gg
     frontUrl: "https://www.${custom.prod.cookieDomain}"
     backUrl: "https://api.${custom.prod.cookieDomain}"
   site:
