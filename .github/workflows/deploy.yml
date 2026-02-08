@@ -1,0 +1,193 @@
+name: deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/**'
+      - 'back/.env'
+      - 'back/src/**'
+      - 'back/build.gradle.kts'
+      - 'back/settings.gradle.kts'
+      - 'back/Dockerfile'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPOSITORY: slog_2026
+  CONTAINER_1_NAME: slog_2026_1
+  CONTAINER_2_NAME: slog_2026_2
+  CONTAINER_PORT: 8080
+  EC2_INSTANCE_TAG_NAME: terra-ec2-1
+  DOCKER_NETWORK: common
+  BACKEND_DIR: back
+
+jobs:
+  makeTagAndRelease:
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.create_tag.outputs.new_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create Tag
+        id: create_tag
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.create_tag.outputs.new_tag }}
+          name: Release ${{ steps.create_tag.outputs.new_tag }}
+          body: ${{ steps.create_tag.outputs.changelog }}
+
+  buildImageAndPush:
+    runs-on: ubuntu-latest
+    needs: makeTagAndRelease
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env
+        working-directory: ${{ env.BACKEND_DIR }}
+        run: |
+          echo "SPRING__SECURITY__OAUTH2__CLIENT__REGISTRATION__KAKAO__CLIENT_ID=${{ secrets.KAKAO__CLIENT_ID }}" >> .env
+          echo "SPRING__SECURITY__OAUTH2__CLIENT__REGISTRATION__GOOGLE__CLIENT_ID=${{ secrets.GOOGLE__CLIENT_ID }}" >> .env
+          echo "SPRING__SECURITY__OAUTH2__CLIENT__REGISTRATION__GOOGLE__CLIENT_SECRET=${{ secrets.GOOGLE__CLIENT_SECRET }}" >> .env
+          echo "SPRING__SECURITY__OAUTH2__CLIENT__REGISTRATION__NAVER__CLIENT_ID=${{ secrets.NAVER__CLIENT_ID }}" >> .env
+          echo "SPRING__SECURITY__OAUTH2__CLIENT__REGISTRATION__NAVER__CLIENT_SECRET=${{ secrets.NAVER__CLIENT_SECRET }}" >> .env
+          echo "CUSTOM__JWT__SECRET_KEY=${{ secrets.JWT__SECRET_KEY }}" >> .env
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.BACKEND_DIR }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_REPOSITORY }}:${{ needs.makeTagAndRelease.outputs.tag_name }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs:
+      - makeTagAndRelease
+      - buildImageAndPush
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+
+      - name: Get EC2 Instance ID
+        id: get_instance_id
+        run: |
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${{ env.EC2_INSTANCE_TAG_NAME }}" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --output text)
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
+
+      - name: Deploy via SSM (Blue/Green)
+        uses: peterkimzz/aws-ssm-send-command@master
+        id: ssm
+        with:
+          aws-region: ap-northeast-2
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          instance-ids: ${{ steps.get_instance_id.outputs.INSTANCE_ID }}
+          working-directory: /root
+          command: |
+            # Variables
+            GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_REPOSITORY }}:latest"
+            CONTAINER_1="${{ env.CONTAINER_1_NAME }}"
+            CONTAINER_2="${{ env.CONTAINER_2_NAME }}"
+            CONTAINER_PORT=${{ env.CONTAINER_PORT }}
+            DOCKER_NETWORK="${{ env.DOCKER_NETWORK }}"
+            NPM_API="http://localhost:81/api"
+            NPM_EMAIL="admin@example.com"
+            NPM_PASSWORD="$PASSWORD_1"
+            DOMAIN="${{ env.EC2_INSTANCE_TAG_NAME }}"
+
+            # Get NPM Token
+            NPM_TOKEN=$(curl -s -X POST "$NPM_API/tokens" \
+              -H "Content-Type: application/json" \
+              -d "{\"identity\":\"$NPM_EMAIL\",\"secret\":\"$NPM_PASSWORD\"}" | jq -r '.token')
+
+            # Determine blue/green
+            if docker ps --format '{{`{{.Names}}`}}' | grep -q "^${CONTAINER_1}$"; then
+              BLUE=$CONTAINER_1
+              GREEN=$CONTAINER_2
+            else
+              BLUE=$CONTAINER_2
+              GREEN=$CONTAINER_1
+            fi
+
+            # Pull latest image
+            docker pull $GHCR_IMAGE
+
+            # Start green container
+            docker run -d \
+              --name $GREEN \
+              --network $DOCKER_NETWORK \
+              --restart always \
+              $GHCR_IMAGE
+
+            # Health check (max 120s)
+            for i in $(seq 1 120); do
+              HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://$GREEN:$CONTAINER_PORT/actuator/health 2>/dev/null || echo "000")
+              if [ "$HEALTH" = "200" ]; then
+                echo "Health check passed"
+                break
+              fi
+              if [ $i -eq 120 ]; then
+                echo "Health check failed"
+                docker stop $GREEN && docker rm $GREEN
+                exit 1
+              fi
+              sleep 1
+            done
+
+            # Get NPM proxy host ID for the domain
+            PROXY_HOST_ID=$(curl -s "$NPM_API/nginx/proxy-hosts" \
+              -H "Authorization: Bearer $NPM_TOKEN" | \
+              jq -r ".[] | select(.domain_names[] == \"$APP_1_DOMAIN\") | .id")
+
+            # Update NPM upstream to green
+            if [ -n "$PROXY_HOST_ID" ]; then
+              PROXY_HOST=$(curl -s "$NPM_API/nginx/proxy-hosts/$PROXY_HOST_ID" \
+                -H "Authorization: Bearer $NPM_TOKEN")
+
+              UPDATED_HOST=$(echo "$PROXY_HOST" | jq \
+                --arg host "$GREEN" \
+                --argjson port "$CONTAINER_PORT" \
+                '.forward_host = $host | .forward_port = $port')
+
+              curl -s -X PUT "$NPM_API/nginx/proxy-hosts/$PROXY_HOST_ID" \
+                -H "Authorization: Bearer $NPM_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "$UPDATED_HOST"
+            fi
+
+            # Stop and remove blue
+            docker stop $BLUE 2>/dev/null
+            docker rm $BLUE 2>/dev/null
+
+            # Cleanup unused images
+            docker image prune -af
+          comment: "Blue/Green Deploy ${{ needs.makeTagAndRelease.outputs.tag_name }}"
