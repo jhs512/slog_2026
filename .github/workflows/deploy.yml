@@ -5,8 +5,8 @@ name: deploy
 # =========================
 env:
   IMAGE_REPOSITORY: slog_2026 # GHCR 이미지 리포지토리명(소유자 포함 X)
-  CONTAINER_1_NAME: slog_2026_1 # 슬롯1(고정 이름)
-  CONTAINER_2_NAME: slog_2026_2 # 슬롯2(고정 이름)
+  CONTAINER_1_NAME: app1_1 # 슬롯1(고정 이름)
+  CONTAINER_2_NAME: app1_2 # 슬롯2(고정 이름)
   CONTAINER_PORT: 8080 # 컨테이너 내부 포트(스프링부트)
   EC2_INSTANCE_TAG_NAME: terra-slog-ec2-1 # 배포 대상 EC2 Name 태그
   DOCKER_NETWORK: common # 도커 네트워크
